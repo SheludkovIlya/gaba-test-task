@@ -49,4 +49,40 @@ export class PromocodesRepository {
       where: { promocodeId },
     });
   }
+
+  async findByCodeWithLock(
+    code: string,
+    tx: Prisma.TransactionClient,
+  ): Promise<Promocode | null> {
+    // Блокируем промокод через SELECT FOR UPDATE
+    const [rawPromocode] = await tx.$queryRaw<
+      Array<{
+        id: string;
+        code: string;
+        discount: number;
+        max_usages: number;
+        expires_at: Date;
+        created_at: Date;
+        updated_at: Date;
+      }>
+    >`
+      SELECT * FROM promocodes
+      WHERE code = ${code}
+      FOR UPDATE
+    `;
+
+    if (!rawPromocode) {
+      return null;
+    }
+
+    return {
+      id: rawPromocode.id,
+      code: rawPromocode.code,
+      discount: rawPromocode.discount,
+      maxUsages: rawPromocode.max_usages,
+      expiresAt: rawPromocode.expires_at,
+      createdAt: rawPromocode.created_at,
+      updatedAt: rawPromocode.updated_at,
+    };
+  }
 }

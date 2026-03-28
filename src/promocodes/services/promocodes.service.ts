@@ -4,8 +4,8 @@ import {
   ConflictException,
   BadRequestException,
 } from '@nestjs/common';
+import { PrismaService } from '@/prisma/prisma.service';
 import { PromocodesRepository } from '../repositories/promocodes.repository';
-import { ActivationsRepository } from '../repositories/activations.repository';
 import { CreatePromocodeDto } from '../dto/create-promocode.dto';
 import { ActivatePromocodeDto } from '../dto/activate-promocode.dto';
 import { Promocode, Activation } from '@prisma/client';
@@ -13,8 +13,8 @@ import { Promocode, Activation } from '@prisma/client';
 @Injectable()
 export class PromocodesService {
   constructor(
+    private readonly prisma: PrismaService,
     private readonly promocodesRepository: PromocodesRepository,
-    private readonly activationsRepository: ActivationsRepository,
   ) {}
 
   async create(dto: CreatePromocodeDto): Promise<Promocode> {
@@ -56,45 +56,53 @@ export class PromocodesService {
   }
 
   async activate(dto: ActivatePromocodeDto): Promise<Activation> {
-    const promocode = await this.promocodesRepository.findByCode(dto.code);
-
-    if (!promocode) {
-      throw new NotFoundException(
-        `Promocode with code "${dto.code}" not found`,
-      );
-    }
-
-    if (promocode.expiresAt < new Date()) {
-      throw new BadRequestException('Promocode has expired');
-    }
-
-    const existingActivation =
-      await this.activationsRepository.findByEmailAndPromocodeId(
-        dto.email,
-        promocode.id,
+    return this.prisma.$transaction(async (tx) => {
+      const promocode = await this.promocodesRepository.findByCodeWithLock(
+        dto.code,
+        tx,
       );
 
-    if (existingActivation) {
-      throw new ConflictException(
-        'This email has already activated this promocode',
-      );
-    }
+      if (!promocode) {
+        throw new NotFoundException(
+          `Promocode with code "${dto.code}" not found`,
+        );
+      }
 
-    const activationsCount = await this.promocodesRepository.countActivations(
-      promocode.id,
-    );
+      if (promocode.expiresAt < new Date()) {
+        throw new BadRequestException('Promocode has expired');
+      }
 
-    if (activationsCount >= promocode.maxUsages) {
-      throw new BadRequestException(
-        'Promocode has reached its activation limit',
-      );
-    }
+      const existingActivation = await tx.activation.findUnique({
+        where: {
+          email_promocodeId: {
+            email: dto.email,
+            promocodeId: promocode.id,
+          },
+        },
+      });
 
-    return this.activationsRepository.create({
-      email: dto.email,
-      promocode: {
-        connect: { id: promocode.id },
-      },
+      if (existingActivation) {
+        throw new ConflictException(
+          'This email has already activated this promocode',
+        );
+      }
+
+      const activationsCount = await tx.activation.count({
+        where: { promocodeId: promocode.id },
+      });
+
+      if (activationsCount >= promocode.maxUsages) {
+        throw new BadRequestException(
+          'Promocode has reached its activation limit',
+        );
+      }
+
+      return tx.activation.create({
+        data: {
+          email: dto.email,
+          promocodeId: promocode.id,
+        },
+      });
     });
   }
 }
